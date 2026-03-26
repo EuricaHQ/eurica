@@ -21,6 +21,25 @@ router = APIRouter()
 _MAX_SYSTEM_ITERATIONS = 3
 
 
+def _confirmation_required(ctx: DecisionContext) -> bool:
+    """Mirror of the guard in transition.py.
+
+    Used by the system-event loop to decide whether to auto-confirm.
+    Must stay in sync with machine/transition.py::_confirmation_required.
+    """
+    if len(ctx.responses) < ctx.min_participants:
+        return True
+    if len(ctx.uncertainties) > 0:
+        return True
+    if len(ctx.objections) > 0:
+        return True
+    if ctx.requires_explicit_approval:
+        return True
+    if ctx.requires_initiator_approval:
+        return True
+    return False
+
+
 def _derive_system_event(
     state: State,
     context: DecisionContext,
@@ -38,6 +57,10 @@ def _derive_system_event(
 
     if state == State.VALIDATING:
         return Event.VALIDATION_COMPLETED
+
+    # Spec v2.8.1: auto-finalize if no confirmation required
+    if state == State.DECIDING and not _confirmation_required(context):
+        return Event.DECISION_CONFIRMED
 
     return None
 

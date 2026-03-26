@@ -62,6 +62,48 @@ def _participation_satisfied_and_no_validation_errors(ctx: DecisionContext) -> b
     return _participation_satisfied(ctx) and not _has_validation_errors(ctx)
 
 
+def _confirmation_required(ctx: DecisionContext) -> bool:
+    """Confirmation guard per spec v2.8.1.
+
+    confirmation_required = true if:
+        - decision is fragile (missing critical participants,
+          narrow majority, weak aggregation, low confidence)
+        - OR critical uncertainty exists (unresolved uncertainty,
+          contradictory signals)
+        - OR explicit confirmation rule set on context
+        - OR initiator approval is required
+
+    Stub: only evaluates structurally available indicators.
+    Full fragility/confidence scoring comes later.
+    """
+    # Fragility: missing critical participants
+    if not _participation_satisfied(ctx):
+        return True
+
+    # Critical uncertainty: unresolved uncertainties from participants
+    if len(ctx.uncertainties) > 0:
+        return True
+
+    # Fragility: strong objections indicate fragile decision
+    if len(ctx.objections) > 0:
+        return True
+
+    # Explicit approval requirement set on context
+    if ctx.requires_explicit_approval:
+        return True
+
+    # Initiator must approve before finalizing
+    if ctx.requires_initiator_approval:
+        return True
+
+    # No fragility or uncertainty detected
+    return False
+
+
+def _confirmation_not_required(ctx: DecisionContext) -> bool:
+    return not _confirmation_required(ctx)
+
+
 def _no_solution(ctx: DecisionContext) -> bool:
     """Stub guard: true when aggregation found no viable solution.
 
@@ -145,17 +187,23 @@ _TRANSITION_TABLE: list[_TransitionEntry] = [
      State.COLLECTING, [ActionType.ASK_QUESTION]),
 
     # --- DECIDING ---
+    # Confirmation guard (spec v2.8.1):
+    # If confirmation NOT required → auto-finalize via system event
+    # If confirmation required → wait for user CONFIRMED/REJECTED
+    (State.DECIDING, Event.DECISION_CONFIRMED, _confirmation_not_required,
+     State.DECIDED, [ActionType.FINALIZE_DECISION]),
+
+    (State.DECIDING, Event.DECISION_CONFIRMED, _confirmation_required,
+     State.DECIDED, [ActionType.FINALIZE_DECISION]),
+
+    (State.DECIDING, Event.DECISION_REJECTED, _always,
+     State.COLLECTING, [ActionType.ASK_QUESTION]),
+
     (State.DECIDING, Event.VALIDATION_REQUIRED, _always,
      State.VALIDATING, [ActionType.VALIDATE_CONSTRAINT]),
 
     (State.DECIDING, Event.CONFLICT_DETECTED, _always,
      State.RESOLVING, [ActionType.RESOLVE_CONFLICT]),
-
-    (State.DECIDING, Event.DECISION_CONFIRMED, _always,
-     State.DECIDED, [ActionType.FINALIZE_DECISION]),
-
-    (State.DECIDING, Event.DECISION_REJECTED, _always,
-     State.COLLECTING, [ActionType.ASK_QUESTION]),
 
     # --- AVOIDING ---
     (State.AVOIDING, Event.RESPONSE_RECEIVED, _always,

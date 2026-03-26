@@ -39,6 +39,11 @@ class DecisionContext:
     conflicts: list[dict] = field(default_factory=list)
     validation_errors: list[str] = field(default_factory=list)
 
+    # Confirmation requirements (spec v2.8.1)
+    requires_explicit_approval: bool = False
+    requires_initiator_approval: bool = False
+    initiator: str | None = None
+
     # Final outcome
     decision: str | None = None
     rejection_reason: str | None = None
