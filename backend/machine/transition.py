@@ -78,6 +78,48 @@ def _is_infeasible(ctx: DecisionContext) -> bool:
     return False
 
 
+def _has_hard_constraints(ctx: DecisionContext) -> bool:
+    """True when any signal snapshot reported a hard constraint."""
+    return "hard" in ctx.constraint_type_signals
+
+
+def _has_high_tension(ctx: DecisionContext) -> bool:
+    """True when responded participants show strong preferences + low flexibility.
+
+    High tension means the outcome is sensitive to new input — missing
+    participants are more likely to shift the result.
+    """
+    return (
+        "strong" in ctx.preference_strength_signals
+        and "low" in ctx.flexibility_signals
+    )
+
+
+def _is_signal_environment_relaxed(ctx: DecisionContext) -> bool:
+    """True when v2 signals clearly indicate low-impact decision environment.
+
+    Relaxed means:
+    - at least one flexibility signal exists (we have data)
+    - all flexibility signals are "high"
+    - all preference_strength signals are "weak" or "none"
+    - no hard constraints
+    - no unresolved uncertainty
+
+    Conservative: returns False when data is missing.
+    """
+    if not ctx.flexibility_signals:
+        return False
+    if _has_hard_constraints(ctx):
+        return False
+    if len(ctx.uncertainties) > 0:
+        return False
+    if any(f != "high" for f in ctx.flexibility_signals):
+        return False
+    if any(p not in ("weak", "none") for p in ctx.preference_strength_signals):
+        return False
+    return True
+
+
 def _has_critical_unresolved_rule_based(ctx: DecisionContext) -> bool:
     """Rule-based evaluation of critical unresolved participants.
 
@@ -87,7 +129,11 @@ def _has_critical_unresolved_rule_based(ctx: DecisionContext) -> bool:
     still affect:
       1. decision rule outcome (consent / majority / threshold)
       2. participation constraint (min_participants)
-      3. feasibility (unresolved uncertainty / constraints)
+      3. feasibility (hard constraints / unresolved uncertainty)
+
+    Uses Signal Layer v2 (flexibility, preference_strength, constraint_type)
+    to refine criticality when available. Falls back to conservative
+    defaults when v2 signals are absent.
 
     Evaluated in order — first True wins.
     """
@@ -102,47 +148,52 @@ def _has_critical_unresolved_rule_based(ctx: DecisionContext) -> bool:
     total = len(ctx.participants)
 
     # Step 2: participation constraint
-    # If current respondents < min_participants, we NEED more people
     if n_responded < ctx.min_participants:
         return True
 
-    # Step 3: decision rule sensitivity
-    rule = ctx.decision_rule
-
-    if rule == "consent":
-        # Under consent, ANY missing participant could still object.
-        # Missing input = potential blocker.
+    # Step 3: feasibility escalators (v2 + v1)
+    # Hard constraints mean feasibility is still in flux — any missing
+    # participant could introduce blocking constraints.
+    if _has_hard_constraints(ctx):
         return True
 
-    if rule in ("majority", "threshold"):
-        # Check if the leading option can still be overturned by
-        # missing participants voting against it.
-        from collections import Counter
-        counts = Counter(ctx.preferences)
-        if not counts:
-            # No preferences at all → outcome completely open
-            return True
-        leader_count = counts.most_common(1)[0][1]
-        threshold = ctx.decision_rule_threshold or (total // 2 + 1)
-        # Leader needs `threshold` votes to lock outcome.
-        if leader_count < threshold:
-            # Leader hasn't reached threshold yet — missing votes matter
-            return True
-        # Leader already at or above threshold — outcome locked
-        return False
-
-    if rule == "unanimity":
-        # Under unanimity, every participant must agree.
-        # Any missing participant is critical.
-        return True
-
-    # Step 4: feasibility — unresolved uncertainty
+    # Unresolved uncertainty affects feasibility regardless of rule.
     if len(ctx.uncertainties) > 0:
         return True
 
-    # Step 5: initiator rule — initiator decides, others don't matter
+    # Step 4: decision rule sensitivity
+    rule = ctx.decision_rule
+
+    if rule == "consent":
+        # Under consent, missing participants could still object.
+        # BUT: if the signal environment is clearly relaxed (everyone
+        # flexible, no strong preferences, no hard constraints),
+        # the missing participant is unlikely to block.
+        if _is_signal_environment_relaxed(ctx):
+            return False
+        return True
+
+    if rule in ("majority", "threshold"):
+        from collections import Counter
+        counts = Counter(ctx.preferences)
+        if not counts:
+            return True
+        leader_count = counts.most_common(1)[0][1]
+        threshold = ctx.decision_rule_threshold or (total // 2 + 1)
+        if leader_count < threshold:
+            return True
+        # Leader at or above threshold — outcome locked by votes.
+        # BUT: high tension (strong prefs + low flexibility) means
+        # the locked result may still face strong opposition.
+        if _has_high_tension(ctx):
+            return True
+        return False
+
+    if rule == "unanimity":
+        return True
+
+    # Step 5: initiator rule — only the initiator's input matters
     if rule == "initiator":
-        # Only the initiator's input matters
         if ctx.initiator and ctx.initiator not in responded:
             return True
         return False
