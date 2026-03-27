@@ -23,3 +23,8 @@ class MockLLM(LLM):
 
     def generate(self, state: str, context: dict) -> str:
         return f"[{state}] What is your preference?"
+
+    def evaluate_critical_participants(
+        self, context: dict, missing: list[str],
+    ) -> dict:
+        return {"critical_participants": []}

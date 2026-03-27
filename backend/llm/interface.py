@@ -45,3 +45,24 @@ class LLM:
             Natural language response string.
         """
         raise NotImplementedError
+
+    def evaluate_critical_participants(
+        self, context: dict, missing: list[str],
+    ) -> dict:
+        """Advisory: identify which missing participants are critical.
+
+        Called ONLY when rule-based logic says no one is critical,
+        to give the LLM a chance to flag participants that structural
+        rules might miss.
+
+        LLM can ONLY escalate (mark as critical), never de-escalate.
+
+        Args:
+            context: Compact decision context (read-only).
+            missing: List of participant names who haven't responded.
+
+        Returns:
+            Dict with key "critical_participants": list[str].
+            Must be a subset of `missing`.
+        """
+        return {"critical_participants": []}

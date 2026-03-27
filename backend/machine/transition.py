@@ -78,35 +78,146 @@ def _is_infeasible(ctx: DecisionContext) -> bool:
     return False
 
 
+def _has_critical_unresolved_rule_based(ctx: DecisionContext) -> bool:
+    """Rule-based evaluation of critical unresolved participants.
+
+    Deterministic. No LLM. Pure predicate on context.
+
+    A participant is critical unresolved if their missing input could
+    still affect:
+      1. decision rule outcome (consent / majority / threshold)
+      2. participation constraint (min_participants)
+      3. feasibility (unresolved uncertainty / constraints)
+
+    Evaluated in order — first True wins.
+    """
+    responded = set(ctx.responses.keys())
+    missing = [p for p in ctx.participants if p not in responded]
+
+    # Step 1: no missing participants → not critical
+    if not missing:
+        return False
+
+    n_responded = len(responded)
+    total = len(ctx.participants)
+
+    # Step 2: participation constraint
+    # If current respondents < min_participants, we NEED more people
+    if n_responded < ctx.min_participants:
+        return True
+
+    # Step 3: decision rule sensitivity
+    rule = ctx.decision_rule
+
+    if rule == "consent":
+        # Under consent, ANY missing participant could still object.
+        # Missing input = potential blocker.
+        return True
+
+    if rule in ("majority", "threshold"):
+        # Check if the leading option can still be overturned by
+        # missing participants voting against it.
+        from collections import Counter
+        counts = Counter(ctx.preferences)
+        if not counts:
+            # No preferences at all → outcome completely open
+            return True
+        leader_count = counts.most_common(1)[0][1]
+        threshold = ctx.decision_rule_threshold or (total // 2 + 1)
+        # Leader needs `threshold` votes to lock outcome.
+        if leader_count < threshold:
+            # Leader hasn't reached threshold yet — missing votes matter
+            return True
+        # Leader already at or above threshold — outcome locked
+        return False
+
+    if rule == "unanimity":
+        # Under unanimity, every participant must agree.
+        # Any missing participant is critical.
+        return True
+
+    # Step 4: feasibility — unresolved uncertainty
+    if len(ctx.uncertainties) > 0:
+        return True
+
+    # Step 5: initiator rule — initiator decides, others don't matter
+    if rule == "initiator":
+        # Only the initiator's input matters
+        if ctx.initiator and ctx.initiator not in responded:
+            return True
+        return False
+
+    # Step 6: fallback — unknown rule, be conservative
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Optional LLM advisory hook for critical participant evaluation.
+#
+# Set via set_critical_participant_advisor(). Called ONLY when rule-based
+# logic returns False (i.e., LLM can only ESCALATE, never de-escalate).
+#
+# The hook receives (context_dict, missing_list) and returns
+# {"critical_participants": [...]}.
+#
+# If no hook is set, or it fails, the guard falls back to rule-based only.
+# ---------------------------------------------------------------------------
+
+_llm_advisor_fn = None
+
+
+def set_critical_participant_advisor(fn):
+    """Register an LLM advisory function for critical participant evaluation.
+
+    fn signature: (context: dict, missing: list[str]) -> dict
+    Expected return: {"critical_participants": [...]}
+
+    Pass None to disable.
+    """
+    global _llm_advisor_fn
+    _llm_advisor_fn = fn
+
+
 def _has_critical_unresolved_participants(ctx: DecisionContext) -> bool:
     """Guard per spec v2.9.2 section 30.
 
-    A participant is critical unresolved if their missing input could
-    still affect feasibility, participation constraints, or the
-    decision rule outcome.
+    Two-layer evaluation:
+    1. Rule-based (deterministic, always runs first)
+    2. LLM advisory (optional, only if rule-based returns False)
 
-    MVP approximation:
-    - participant has no response yet (not in ctx.responses)
-    - AND decision is not yet stable (no unanimous preference)
-
-    A stable decision = all expressed preferences converge to a single
-    value.  If preferences diverge or are empty, the decision is
-    unstable and missing input is still relevant.
+    LLM can ONLY escalate (mark as critical), never de-escalate.
+    If LLM fails or is not configured → rule-based result stands.
     """
     responded = set(ctx.responses.keys())
-    unresolved = [p for p in ctx.participants if p not in responded]
+    missing = [p for p in ctx.participants if p not in responded]
 
-    if not unresolved:
+    if not missing:
         return False
 
-    # Decision stability: unanimous preferences → stable
-    unique_prefs = set(ctx.preferences)
-    decision_stable = len(unique_prefs) == 1 and len(ctx.preferences) > 0
+    # Rule-based evaluation (deterministic baseline)
+    rule_result = _has_critical_unresolved_rule_based(ctx)
+    if rule_result:
+        return True
 
-    if decision_stable:
-        return False
+    # Optional LLM advisory layer
+    if _llm_advisor_fn is not None:
+        try:
+            compact_context = {
+                "question": ctx.question,
+                "participants": ctx.participants,
+                "preferences": ctx.preferences,
+                "constraints": ctx.constraints,
+                "decision_rule": ctx.decision_rule,
+            }
+            result = _llm_advisor_fn(compact_context, missing)
+            critical = result.get("critical_participants", [])
+            if isinstance(critical, list) and len(critical) > 0:
+                return True
+        except Exception:
+            # LLM failure → fall back to rule-based result (False)
+            pass
 
-    return True
+    return False
 
 
 def _solution_found(ctx: DecisionContext) -> bool:

@@ -133,3 +133,51 @@ class OpenAILLM(LLM):
             return self._call(prompt)
         except Exception:
             return f"[{state}] How would you like to proceed?"
+
+    # -----------------------------------------------------------------
+    # evaluate_critical_participants()
+    # -----------------------------------------------------------------
+
+    def evaluate_critical_participants(
+        self, context: dict, missing: list[str],
+    ) -> dict:
+        """Ask LLM which missing participants could still influence the outcome.
+
+        Advisory only. On any failure, returns empty list (safe default).
+        """
+        prompt = (
+            "You are evaluating a group decision.\n"
+            "\n"
+            f"Decision question: {context.get('question', '(not set)')}\n"
+            f"Decision rule: {context.get('decision_rule', 'consent')}\n"
+            f"Current preferences: {context.get('preferences', [])}\n"
+            f"Current constraints: {context.get('constraints', [])}\n"
+            f"Missing participants (have not responded): {missing}\n"
+            "\n"
+            "Which of the missing participants could still influence "
+            "the decision outcome? Consider whether their input could:\n"
+            "- change the winning option\n"
+            "- block consensus\n"
+            "- introduce new constraints\n"
+            "- affect feasibility\n"
+            "\n"
+            "Return ONLY a JSON object:\n"
+            '{"critical_participants": ["name1", "name2"]}\n'
+            "\n"
+            "If none are critical, return:\n"
+            '{"critical_participants": []}\n'
+            "\n"
+            "JSON ONLY. No explanation."
+        )
+
+        try:
+            raw = self._call(prompt)
+            result = json.loads(raw)
+            participants = result.get("critical_participants", [])
+            if not isinstance(participants, list):
+                return {"critical_participants": []}
+            # Sanitize: only keep names that are actually in missing
+            valid = [p for p in participants if p in missing]
+            return {"critical_participants": valid}
+        except Exception:
+            return {"critical_participants": []}

@@ -1,9 +1,12 @@
 """Tests for has_critical_unresolved_participants guard (spec v2.9.2).
 
-Verifies:
-- decision blocked when critical participants haven't responded
-- decision allowed when missing participant is NOT critical (stable decision)
-- decision allowed when all participants have responded
+Verifies rule-based guard behavior across:
+- consent rule (any missing → critical)
+- majority / threshold rules (outcome-locked → not critical)
+- participation constraint (min_participants)
+- feasibility (uncertainty)
+- initiator rule
+- edge cases
 
 Run: python3 test_critical_unresolved.py
 """
@@ -29,7 +32,7 @@ def _step(state, event, ctx, expected_state, label=""):
 
 
 # ---------------------------------------------------------------------------
-# Guard unit tests
+# Step 1: no missing participants
 # ---------------------------------------------------------------------------
 
 def test_guard_all_responded():
@@ -41,42 +44,6 @@ def test_guard_all_responded():
         preferences=["Italian", "Thai"],
     )
     assert not _has_critical_unresolved_participants(ctx)
-
-
-def test_guard_missing_unstable():
-    """Critical unresolved: bob hasn't responded, preferences diverge."""
-    ctx = DecisionContext(
-        participants=["alice", "bob", "carol"],
-        min_participants=2,
-        responses={"alice": ["Italian"], "carol": ["Thai"]},
-        preferences=["Italian", "Thai"],
-    )
-    # bob missing + preferences split → critical
-    assert _has_critical_unresolved_participants(ctx)
-
-
-def test_guard_missing_stable():
-    """NOT critical: bob hasn't responded, but decision is unanimous."""
-    ctx = DecisionContext(
-        participants=["alice", "bob", "carol"],
-        min_participants=2,
-        responses={"alice": ["Italian"], "carol": ["Italian"]},
-        preferences=["Italian", "Italian"],
-    )
-    # bob missing BUT all current preferences agree → stable → not critical
-    assert not _has_critical_unresolved_participants(ctx)
-
-
-def test_guard_no_preferences_yet():
-    """Critical: someone responded but no preferences extracted yet."""
-    ctx = DecisionContext(
-        participants=["alice", "bob"],
-        min_participants=1,
-        responses={"alice": ["hmm, not sure"]},
-        preferences=[],  # no preferences → unstable
-    )
-    # bob hasn't responded + no preferences → critical
-    assert _has_critical_unresolved_participants(ctx)
 
 
 def test_guard_no_participants_defined():
@@ -91,78 +58,290 @@ def test_guard_no_participants_defined():
 
 
 # ---------------------------------------------------------------------------
+# Step 2: participation constraint (min_participants)
+# ---------------------------------------------------------------------------
+
+def test_guard_min_participants_not_met():
+    """Critical: need 3 respondents, only have 1."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol"],
+        min_participants=3,
+        responses={"alice": ["Italian"]},
+        preferences=["Italian"],
+    )
+    assert _has_critical_unresolved_participants(ctx)
+
+
+def test_guard_min_participants_met_but_consent_blocks():
+    """min_participants met (2 >= 2), but consent rule still blocks."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol"],
+        min_participants=2,
+        decision_rule="consent",
+        responses={"alice": ["Italian"], "bob": ["Thai"]},
+        preferences=["Italian", "Thai"],
+    )
+    # carol missing + consent → critical (could object)
+    assert _has_critical_unresolved_participants(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Step 3: consent rule (any missing → critical)
+# ---------------------------------------------------------------------------
+
+def test_guard_consent_blocks_with_missing():
+    """Consent rule: ANY missing participant is critical (could object)."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol"],
+        min_participants=2,
+        decision_rule="consent",
+        responses={"alice": ["Italian"], "carol": ["Italian"]},
+        preferences=["Italian", "Italian"],  # unanimous doesn't matter
+    )
+    # bob missing + consent → critical (could still object)
+    assert _has_critical_unresolved_participants(ctx)
+
+
+def test_guard_consent_ok_when_all_responded():
+    """Consent rule: no critical when everyone has responded."""
+    ctx = DecisionContext(
+        participants=["alice", "bob"],
+        min_participants=2,
+        decision_rule="consent",
+        responses={"alice": ["Italian"], "bob": ["Italian"]},
+        preferences=["Italian", "Italian"],
+    )
+    assert not _has_critical_unresolved_participants(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Step 4: majority / threshold rules
+# ---------------------------------------------------------------------------
+
+def test_guard_majority_outcome_locked():
+    """Majority rule: leader has enough votes, missing can't flip it."""
+    # 5 participants, 3 responded "Italian", 1 responded "Thai", 1 missing
+    # majority threshold = 5 // 2 + 1 = 3 → leader has 3 → locked
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol", "dave", "eve"],
+        min_participants=3,
+        decision_rule="majority",
+        responses={
+            "alice": ["Italian"], "bob": ["Italian"],
+            "carol": ["Italian"], "dave": ["Thai"],
+        },
+        preferences=["Italian", "Italian", "Italian", "Thai"],
+    )
+    # eve missing but Italian already has 3/5 (majority) → not critical
+    assert not _has_critical_unresolved_participants(ctx)
+
+
+def test_guard_majority_outcome_not_locked():
+    """Majority rule: leader below threshold, missing votes matter."""
+    # 5 participants, 2 "Italian", 1 "Thai", 2 missing
+    # majority threshold = 3, leader has 2 → NOT locked
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol", "dave", "eve"],
+        min_participants=2,
+        decision_rule="majority",
+        responses={
+            "alice": ["Italian"], "bob": ["Italian"],
+            "carol": ["Thai"],
+        },
+        preferences=["Italian", "Italian", "Thai"],
+    )
+    # dave + eve missing, Italian only has 2 < 3 → critical
+    assert _has_critical_unresolved_participants(ctx)
+
+
+def test_guard_threshold_locked():
+    """Threshold rule: leader meets custom threshold."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol", "dave"],
+        min_participants=2,
+        decision_rule="threshold",
+        decision_rule_threshold=2,
+        responses={
+            "alice": ["Italian"], "bob": ["Italian"],
+            "carol": ["Thai"],
+        },
+        preferences=["Italian", "Italian", "Thai"],
+    )
+    # dave missing but Italian has 2 >= threshold(2) → not critical
+    assert not _has_critical_unresolved_participants(ctx)
+
+
+def test_guard_threshold_not_locked():
+    """Threshold rule: leader below custom threshold."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol", "dave"],
+        min_participants=2,
+        decision_rule="threshold",
+        decision_rule_threshold=3,
+        responses={
+            "alice": ["Italian"], "bob": ["Italian"],
+            "carol": ["Thai"],
+        },
+        preferences=["Italian", "Italian", "Thai"],
+    )
+    # dave missing, Italian has 2 < threshold(3) → critical
+    assert _has_critical_unresolved_participants(ctx)
+
+
+def test_guard_majority_no_preferences():
+    """Majority rule: no preferences yet → outcome open → critical."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol"],
+        min_participants=1,
+        decision_rule="majority",
+        responses={"alice": ["hmm"]},
+        preferences=[],
+    )
+    assert _has_critical_unresolved_participants(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Step 4b: unanimity rule
+# ---------------------------------------------------------------------------
+
+def test_guard_unanimity_missing():
+    """Unanimity rule: any missing participant is critical."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol"],
+        min_participants=2,
+        decision_rule="unanimity",
+        responses={"alice": ["Italian"], "bob": ["Italian"]},
+        preferences=["Italian", "Italian"],
+    )
+    # carol missing + unanimity → critical (must agree)
+    assert _has_critical_unresolved_participants(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Step 5: feasibility (uncertainty)
+# ---------------------------------------------------------------------------
+
+def test_guard_uncertainty_blocks():
+    """Unresolved uncertainty makes missing participants critical."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol"],
+        min_participants=2,
+        decision_rule="initiator",
+        initiator="alice",
+        responses={"alice": ["Italian"], "bob": ["Italian"]},
+        preferences=["Italian", "Italian"],
+        uncertainties=["budget unclear"],
+    )
+    # initiator rule: alice responded, carol non-critical by rule...
+    # BUT uncertainty exists → critical
+    assert _has_critical_unresolved_participants(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Step 5b: initiator rule
+# ---------------------------------------------------------------------------
+
+def test_guard_initiator_responded():
+    """Initiator rule: initiator responded, others don't matter."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol"],
+        min_participants=1,
+        decision_rule="initiator",
+        initiator="alice",
+        responses={"alice": ["Italian"]},
+        preferences=["Italian"],
+    )
+    # bob + carol missing, but initiator rule → only alice matters
+    assert not _has_critical_unresolved_participants(ctx)
+
+
+def test_guard_initiator_missing():
+    """Initiator rule: initiator hasn't responded → critical."""
+    ctx = DecisionContext(
+        participants=["alice", "bob", "carol"],
+        min_participants=1,
+        decision_rule="initiator",
+        initiator="bob",
+        responses={"alice": ["Italian"]},
+        preferences=["Italian"],
+    )
+    # bob (initiator) missing → critical
+    assert _has_critical_unresolved_participants(ctx)
+
+
+# ---------------------------------------------------------------------------
 # Integration: solution_found includes the guard
 # ---------------------------------------------------------------------------
 
 def test_solution_found_blocked_by_critical():
-    """solution_found returns False when critical unresolved participants exist."""
+    """solution_found returns False when critical unresolved (consent rule)."""
     ctx = DecisionContext(
         question="Where to eat?",
         participants=["alice", "bob", "carol"],
         min_participants=2,
+        decision_rule="consent",
         responses={"alice": ["Italian"], "carol": ["Thai"]},
-        preferences=["Italian", "Thai"],  # divergent → unstable
+        preferences=["Italian", "Thai"],
     )
-    # participation satisfied (2 >= 2), no conflicts, no constraints,
-    # but bob missing + unstable → solution NOT found
+    # bob missing + consent → critical → solution NOT found
     assert not _solution_found(ctx)
 
 
-def test_solution_found_allowed_when_stable():
-    """solution_found returns True when missing participant is non-critical."""
+def test_solution_found_allowed_majority_locked():
+    """solution_found returns True when majority is locked in."""
     ctx = DecisionContext(
         question="Where to eat?",
-        participants=["alice", "bob", "carol"],
-        min_participants=2,
-        responses={"alice": ["Italian"], "carol": ["Italian"]},
-        preferences=["Italian", "Italian"],  # unanimous → stable
+        participants=["alice", "bob", "carol", "dave", "eve"],
+        min_participants=3,
+        decision_rule="majority",
+        responses={
+            "alice": ["Italian"], "bob": ["Italian"],
+            "carol": ["Italian"], "dave": ["Thai"],
+        },
+        preferences=["Italian", "Italian", "Italian", "Thai"],
     )
-    # participation satisfied (2 >= 2), unanimous, bob non-critical
+    # eve missing but Italian has majority (3/5) → solution found
     assert _solution_found(ctx)
 
 
 # ---------------------------------------------------------------------------
-# Transition-level: blocked decision stays in AGGREGATING fallback
+# Transition-level: AGGREGATING routing
 # ---------------------------------------------------------------------------
 
 def test_aggregating_blocked_by_critical_participant():
     """AGGREGATION_COMPLETED in AGGREGATING → COLLECTING (not DECIDING)
-    when critical unresolved participants exist.
-
-    This is the key behavioral test: the system does NOT jump to DECIDING
-    when a missing participant could still change the outcome.
+    when critical unresolved participants exist (consent rule).
     """
     ctx = DecisionContext(
         question="Where to eat?",
         participants=["alice", "bob", "carol"],
         min_participants=2,
+        decision_rule="consent",
         responses={"alice": ["Italian"], "carol": ["Thai"]},
-        preferences=["Italian", "Thai"],  # divergent
+        preferences=["Italian", "Thai"],
     )
-
-    # solution_found fails (critical unresolved) → fallback to COLLECTING
     state, actions, ctx = _step(
         State.AGGREGATING, Event.AGGREGATION_COMPLETED, ctx,
-        State.COLLECTING, "blocked: critical unresolved bob",
+        State.COLLECTING, "blocked: consent + bob missing",
     )
 
 
-def test_aggregating_allowed_when_stable():
-    """AGGREGATION_COMPLETED in AGGREGATING → DECIDING
-    when missing participant is non-critical (unanimous decision).
-    """
+def test_aggregating_allowed_majority_locked():
+    """AGGREGATION_COMPLETED → DECIDING when majority locked despite missing."""
     ctx = DecisionContext(
         question="Where to eat?",
-        participants=["alice", "bob", "carol"],
-        min_participants=2,
-        responses={"alice": ["Italian"], "carol": ["Italian"]},
-        preferences=["Italian", "Italian"],  # unanimous
+        participants=["alice", "bob", "carol", "dave", "eve"],
+        min_participants=3,
+        decision_rule="majority",
+        responses={
+            "alice": ["Italian"], "bob": ["Italian"],
+            "carol": ["Italian"], "dave": ["Thai"],
+        },
+        preferences=["Italian", "Italian", "Italian", "Thai"],
     )
-
-    # solution_found passes (bob non-critical) → DECIDING
     state, actions, ctx = _step(
         State.AGGREGATING, Event.AGGREGATION_COMPLETED, ctx,
-        State.DECIDING, "allowed: bob non-critical",
+        State.DECIDING, "allowed: majority locked",
     )
 
 
@@ -172,11 +351,10 @@ def test_aggregating_all_responded():
         question="Where to eat?",
         participants=["alice", "bob"],
         min_participants=2,
+        decision_rule="consent",
         responses={"alice": ["Italian"], "bob": ["Thai"]},
-        preferences=["Italian", "Thai"],  # divergent but everyone responded
+        preferences=["Italian", "Thai"],
     )
-
-    # All responded → no critical unresolved → DECIDING
     state, actions, ctx = _step(
         State.AGGREGATING, Event.AGGREGATION_COMPLETED, ctx,
         State.DECIDING, "all responded, divergent ok",
@@ -185,18 +363,34 @@ def test_aggregating_all_responded():
 
 if __name__ == "__main__":
     tests = [
-        # Guard unit tests
+        # Step 1: no missing
         test_guard_all_responded,
-        test_guard_missing_unstable,
-        test_guard_missing_stable,
-        test_guard_no_preferences_yet,
         test_guard_no_participants_defined,
-        # solution_found integration
+        # Step 2: participation constraint
+        test_guard_min_participants_not_met,
+        test_guard_min_participants_met_but_consent_blocks,
+        # Step 3: consent rule
+        test_guard_consent_blocks_with_missing,
+        test_guard_consent_ok_when_all_responded,
+        # Step 4: majority / threshold
+        test_guard_majority_outcome_locked,
+        test_guard_majority_outcome_not_locked,
+        test_guard_threshold_locked,
+        test_guard_threshold_not_locked,
+        test_guard_majority_no_preferences,
+        # Step 4b: unanimity
+        test_guard_unanimity_missing,
+        # Step 5: feasibility
+        test_guard_uncertainty_blocks,
+        # Step 5b: initiator rule
+        test_guard_initiator_responded,
+        test_guard_initiator_missing,
+        # Integration: solution_found
         test_solution_found_blocked_by_critical,
-        test_solution_found_allowed_when_stable,
+        test_solution_found_allowed_majority_locked,
         # Transition-level
         test_aggregating_blocked_by_critical_participant,
-        test_aggregating_allowed_when_stable,
+        test_aggregating_allowed_majority_locked,
         test_aggregating_all_responded,
     ]
     for t in tests:
