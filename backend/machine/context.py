@@ -50,6 +50,12 @@ class DecisionContext:
     requires_initiator_approval: bool = False
     initiator: str | None = None
 
+    # Dimension governance (spec v2.10.9)
+    # expected_dimensions: authoritative — drives completeness routing
+    # proposed_dimensions: non-authoritative — carried in context only, no effect on logic
+    expected_dimensions: list[str] | None = None
+    proposed_dimensions: list[str] | None = None
+
     # Final outcome
     decision: str | None = None
     rejection_reason: str | None = None

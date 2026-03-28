@@ -259,14 +259,76 @@ def _solution_found(ctx: DecisionContext) -> bool:
     Per spec v2.9.2 section 28 (Decision Readiness):
       solution_found AND participation_satisfied
       AND NOT has_critical_unresolved_participants
+
+    Requires at least one preference to constitute a solution.
     """
     return (
-        _participation_satisfied(ctx)
+        len(ctx.preferences) > 0
+        and _participation_satisfied(ctx)
         and not _has_conflict(ctx)
         and not _needs_validation(ctx)
         and not _is_infeasible(ctx)
         and not _has_critical_unresolved_participants(ctx)
     )
+
+
+def _solution_complete(ctx: DecisionContext) -> bool:
+    """Spec v2.10.8 §37.4: deterministic completeness evaluation.
+
+    A solution is complete when:
+    - no open conflicts
+    - no critical unresolved participants
+    - no materially missing dimensions
+
+    This is NOT a guard — it is used for routing within solution_found.
+    """
+    if _has_conflict(ctx):
+        return False
+    if _has_critical_unresolved_participants(ctx):
+        return False
+    if _has_materially_missing_dimensions(ctx):
+        return False
+    return True
+
+
+def _has_materially_missing_dimensions(ctx: DecisionContext) -> bool:
+    """Spec v2.10.8 §37.4: check if expected dimensions are not yet covered.
+
+    Uses ctx.expected_dimensions as the reference set. If no expected
+    dimensions are defined, completeness cannot be evaluated and the
+    solution is assumed complete (no implicit heuristics).
+    """
+    if not ctx.expected_dimensions:
+        return False
+
+    observed: set[str] = set()
+    for p in ctx.preferences:
+        if isinstance(p, dict) and p.get("dimension"):
+            observed.add(p["dimension"])
+
+    missing = set(ctx.expected_dimensions) - observed
+    return len(missing) > 0
+
+
+def _get_missing_dimensions(ctx: DecisionContext) -> list[str]:
+    """Return list of expected dimensions not yet covered by preferences."""
+    if not ctx.expected_dimensions:
+        return []
+    observed: set[str] = set()
+    for p in ctx.preferences:
+        if isinstance(p, dict) and p.get("dimension"):
+            observed.add(p["dimension"])
+    return sorted(set(ctx.expected_dimensions) - observed)
+
+
+def _solution_found_and_complete(ctx: DecisionContext) -> bool:
+    """Routing predicate: solution found AND complete per v2.10.8 §37.4."""
+    return _solution_found(ctx) and _solution_complete(ctx)
+
+
+def _solution_found_but_incomplete(ctx: DecisionContext) -> bool:
+    """Routing predicate: solution found but NOT complete per v2.10.8 §37.4."""
+    return _solution_found(ctx) and not _solution_complete(ctx)
 
 
 def _confirmation_required(ctx: DecisionContext) -> bool:
@@ -386,8 +448,13 @@ _TRANSITION_TABLE: list[_TransitionEntry] = [
      State.VALIDATING, [ActionType.VALIDATE_CONSTRAINT]),
     (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _is_avoidance,
      State.AVOIDING, [ActionType.ADDRESS_AVOIDANCE]),
-    (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _solution_found,
+    # solution_found routing — spec v2.10.8 §37.4:
+    #   complete → DECIDING
+    #   incomplete → stay in AGGREGATING (clarification via action payload)
+    (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _solution_found_and_complete,
      State.DECIDING, [ActionType.PROPOSE_DECISION]),
+    (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _solution_found_but_incomplete,
+     State.AGGREGATING, [ActionType.ASK_QUESTION]),
     # Fallback: no solution criteria met → back to collecting
     (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _always,
      State.COLLECTING, [ActionType.ASK_QUESTION]),
@@ -518,6 +585,14 @@ def transition(
     for t_state, t_event, guard, next_state, action_types in _TRANSITION_TABLE:
         if t_state == state and t_event == event and guard(context):
             actions = [Action(at) for at in action_types]
+            # Spec v2.10.8 §37.4: attach clarification payload on incomplete routing
+            if guard is _solution_found_but_incomplete:
+                missing = _get_missing_dimensions(context)
+                interaction_type = "clarify_dimension" if missing else "clarify"
+                payload = {"interaction_type": interaction_type}
+                if missing:
+                    payload["missing_dimensions"] = missing
+                actions = [Action(at, payload=payload) for at in action_types]
             return (next_state, actions, context)
 
     # Spec v2.9: no implicit no-op allowed. Every (state, event) must
