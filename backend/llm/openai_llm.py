@@ -92,7 +92,14 @@ class OpenAILLM(LLM):
             "Return ONLY a JSON object with EXACTLY these keys:\n"
             "\n"
             "Core signals:\n"
-            "- preferences: list of strings (stated preferences)\n"
+            "- preferences: list of objects, each with:\n"
+            '  - "value": string (the preference)\n'
+            '  - "dimension": string (optional — inferred category)\n'
+            "  Examples:\n"
+            '    {"value": "Wednesday", "dimension": "day"}\n'
+            '    {"value": "Evening", "dimension": "time"}\n'
+            '    {"value": "Italian", "dimension": "cuisine"}\n'
+            "  If dimension cannot be inferred, omit it.\n"
             "- constraints: list of strings (hard restrictions: must / cannot)\n"
             "- uncertainty: boolean (user expresses doubt or confusion)\n"
             "- conflict: boolean (user disagrees with existing preferences)\n"

@@ -371,12 +371,19 @@ _TRANSITION_TABLE: list[_TransitionEntry] = [
     (State.AGGREGATING, Event.RESPONSE_RECEIVED, _always,
      State.AGGREGATING, []),
     # AGGREGATION_COMPLETED — primary routing event
+    # Guard priority order per spec v2.10.5 §24:
+    #   1. is_infeasible (terminal — absolute priority)
+    #   2. has_conflict (highest routing priority)
+    #   3. needs_validation
+    #   4. is_avoidance
+    #   5. solution_found
+    #   6. fallback → COLLECTING
     (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _is_infeasible,
      State.INFEASIBLE, [ActionType.MARK_INFEASIBLE]),
-    (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _needs_validation,
-     State.VALIDATING, [ActionType.VALIDATE_CONSTRAINT]),
     (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _has_conflict,
      State.RESOLVING, [ActionType.RESOLVE_CONFLICT]),
+    (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _needs_validation,
+     State.VALIDATING, [ActionType.VALIDATE_CONSTRAINT]),
     (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _is_avoidance,
      State.AVOIDING, [ActionType.ADDRESS_AVOIDANCE]),
     (State.AGGREGATING, Event.AGGREGATION_COMPLETED, _solution_found,

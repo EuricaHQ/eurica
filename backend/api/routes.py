@@ -52,18 +52,85 @@ def _confirmation_required(ctx: DecisionContext) -> bool:
 # Context helpers
 # ---------------------------------------------------------------------------
 
+def _get_pref_value(p) -> str:
+    """Extract value from a preference (string or dict with 'value' key)."""
+    if isinstance(p, dict):
+        return p.get("value", "")
+    return str(p)
+
+
+def _get_pref_dimension(p) -> str | None:
+    """Extract dimension from a preference (None if string or missing)."""
+    if isinstance(p, dict):
+        return p.get("dimension")
+    return None
+
+
+def _has_same_dimension_conflict(
+    new_prefs: list,
+    existing_prefs: list,
+    constraints: list | None = None,
+) -> bool:
+    """Spec v2.10.6 §18 Conflict Compatibility Rule.
+
+    A conflict may only be created if preferences refer to the SAME
+    dimension AND are incompatible. Different dimensions = complementary.
+    Missing dimension = no conflict assumed.
+
+    Also checks hard constraints: if a constraint text references an
+    existing preference value, that's a same-dimension conflict.
+    """
+    # Check preference vs preference (different values, same dimension)
+    for np in new_prefs:
+        n_dim = _get_pref_dimension(np)
+        n_val = _get_pref_value(np).lower()
+        if not n_dim or not n_val:
+            continue
+        for ep in existing_prefs:
+            e_dim = _get_pref_dimension(ep)
+            e_val = _get_pref_value(ep).lower()
+            if not e_dim:
+                continue
+            if n_dim == e_dim and n_val != e_val:
+                return True
+
+    # Check constraint vs existing preference (hard constraint negates
+    # an existing preference value → same-dimension conflict)
+    if constraints:
+        for constraint_text in constraints:
+            if not isinstance(constraint_text, str):
+                continue
+            c_lower = constraint_text.lower()
+            for ep in existing_prefs:
+                e_val = _get_pref_value(ep).lower()
+                if e_val and e_val in c_lower:
+                    return True
+
+    return False
+
+
 def _map_conflict_signal(
     context: DecisionContext,
     signals: dict,
     actor: str,
 ) -> list[dict]:
-    """Spec v2.10.3 §25.7.2: signal.conflict → ctx.conflicts mapping.
+    """Spec v2.10.6 §18: dimension-aware conflict mapping.
 
-    Creates a structured conflict entry when signal.conflict is true.
-    Deduplication (§25.7.5): skip if an open conflict from the same
-    actor + source already exists.
+    Creates a structured conflict entry ONLY when:
+    1. signal.conflict == true
+    2. New preferences conflict with existing in the SAME dimension
+    3. Values are incompatible
+
+    If dimension is missing on either side → no conflict created.
+    Deduplication (§25.7.5): skip if open conflict from same actor exists.
     """
     if not signals.get("conflict"):
+        return context.conflicts
+
+    # Dimension-aware validation: only create conflict if same-dimension clash
+    new_prefs = signals.get("preferences", [])
+    new_constraints = signals.get("constraints", [])
+    if not _has_same_dimension_conflict(new_prefs, context.preferences, new_constraints):
         return context.conflicts
 
     # Deduplication: same actor, same source, still open
@@ -84,6 +151,28 @@ def _map_conflict_signal(
     return context.conflicts + [entry]
 
 
+def _normalize_preferences(raw_prefs: list, actor: str) -> list[dict]:
+    """Normalize preferences to structured dicts with participant.
+
+    Accepts both old format (strings) and new format (dicts with value/dimension).
+    Spec v2.10.6 §25.8: preference = {value, dimension (optional)}.
+    """
+    result = []
+    for p in raw_prefs:
+        if isinstance(p, dict):
+            entry = {
+                "participant": actor,
+                "value": p.get("value", ""),
+            }
+            if p.get("dimension"):
+                entry["dimension"] = p["dimension"]
+            result.append(entry)
+        elif isinstance(p, str):
+            result.append({"participant": actor, "value": p})
+        # skip anything else
+    return result
+
+
 def _apply_actions(
     context: DecisionContext,
     actions: list[Action],
@@ -96,12 +185,13 @@ def _apply_actions(
     Actions are recorded but do not alter context here — they describe
     WHAT should happen, and the LLM response layer handles the HOW.
 
-    Spec v2.10.3 §25.7: signal.conflict is materialized into ctx.conflicts
-    so that guards operate exclusively on structured context.
+    Spec v2.10.6 §25.8: preferences stored as structured dicts with dimension.
+    Spec v2.10.3 §25.7: signal.conflict is materialized into ctx.conflicts.
     """
+    new_prefs = _normalize_preferences(signals.get("preferences", []), actor)
     return replace(
         context,
-        preferences=context.preferences + signals.get("preferences", []),
+        preferences=context.preferences + new_prefs,
         constraints=context.constraints + signals.get("constraints", []),
         uncertainties=context.uncertainties + (
             ["uncertainty"] if signals.get("uncertainty") else []

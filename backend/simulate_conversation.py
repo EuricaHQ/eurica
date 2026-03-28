@@ -42,26 +42,36 @@ class _SimulatorMockLLM(LLM):
     Not used in production or tests.
     """
 
+    # Dimension lookup tables
+    _DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
+             "saturday", "sunday")
+    _TIMES = ("morning", "evening", "afternoon", "night")
+    _FOODS = ("italian", "asian", "thai", "mexican", "sushi",
+              "pizza", "burgers", "indian", "chinese", "japanese")
+
     def interpret(self, message: str, context: dict) -> dict:
         lower = message.lower()
-        words = lower.split()
 
-        # Extract preferences: simple keyword/noun extraction
-        preferences: list[str] = []
-        # Day/time preferences
-        for day in ("monday", "tuesday", "wednesday", "thursday", "friday",
-                     "saturday", "sunday", "morning", "evening", "afternoon"):
-            if day in lower:
-                preferences.append(day.capitalize())
-        # Food preferences
-        for food in ("italian", "asian", "thai", "mexican", "sushi",
-                      "pizza", "burgers", "indian", "chinese", "japanese"):
-            if food in lower:
-                preferences.append(food.capitalize())
+        # Extract preferences with dimensions
+        # Skip extraction when message is a hard constraint (negation context)
+        is_negation = any(w in lower for w in ("cannot", "can't", "never",
+                                                "not", "don't"))
+        preferences: list[dict] = []
+        if not is_negation:
+            for day in self._DAYS:
+                if day in lower:
+                    preferences.append({"value": day.capitalize(), "dimension": "day"})
+            for time in self._TIMES:
+                if time in lower:
+                    preferences.append({"value": time.capitalize(), "dimension": "time"})
+            for food in self._FOODS:
+                if food in lower:
+                    preferences.append({"value": food.capitalize(), "dimension": "cuisine"})
 
         # Flexibility
         if any(w in lower for w in ("flexible", "anything", "don't mind",
-                                     "whatever", "either", "any")):
+                                     "whatever", "either", "any",
+                                     "i guess", "is ok", "is fine i guess")):
             flexibility = "high"
         elif any(w in lower for w in ("definitely", "must", "only",
                                        "really prefer")):
@@ -81,21 +91,47 @@ class _SimulatorMockLLM(LLM):
         else:
             preference_strength = "none"
 
-        # Conflict detection: check if new preference contradicts existing
-        existing_prefs = [p.lower() for p in context.get("preferences", [])]
-        new_prefs = [p.lower() for p in preferences]
-        conflict = bool(
-            existing_prefs and new_prefs
-            and not any(p in existing_prefs for p in new_prefs)
-        )
-
-        # Constraint type
+        # Constraint type (computed before conflict to inform it)
         if any(w in lower for w in ("must", "cannot", "can't", "never")):
             constraint_type = "hard"
         elif any(w in lower for w in ("prefer not", "rather not")):
             constraint_type = "soft"
         else:
             constraint_type = "none"
+
+        # Dimension-aware conflict detection (spec v2.10.6 §18)
+        # Only flag conflict if same dimension + different value
+        existing_prefs = context.get("preferences", [])
+        conflict = False
+        for np in preferences:
+            n_dim = np.get("dimension")
+            n_val = np.get("value", "").lower()
+            if not n_dim:
+                continue
+            for ep in existing_prefs:
+                if isinstance(ep, dict):
+                    e_dim = ep.get("dimension")
+                    e_val = ep.get("value", "").lower()
+                else:
+                    continue
+                if e_dim == n_dim and n_val != e_val:
+                    conflict = True
+                    break
+            if conflict:
+                break
+
+        # Hard constraint against same-dimension existing = conflict
+        # When message is a negation, preferences are empty, so check
+        # constraint text against existing preference values directly
+        if not conflict and constraint_type == "hard" and existing_prefs:
+            for ep in existing_prefs:
+                if isinstance(ep, dict):
+                    e_val = ep.get("value", "").lower()
+                else:
+                    continue
+                if e_val and e_val in lower:
+                    conflict = True
+                    break
 
         # Constraints
         constraints: list[str] = []
@@ -119,22 +155,33 @@ class _SimulatorMockLLM(LLM):
             "constraint_type": constraint_type,
         }
 
+    @staticmethod
+    def _pref_values(prefs: list) -> list[str]:
+        """Extract display values from structured or plain preferences."""
+        result = []
+        for p in prefs:
+            if isinstance(p, dict):
+                result.append(p.get("value", str(p)))
+            else:
+                result.append(str(p))
+        return result
+
     def generate(self, state: str, context: dict) -> str:
-        q = context.get("question", "")
         prefs = context.get("preferences", [])
         parts = context.get("participants", [])
+        vals = self._pref_values(prefs)
 
         if state == "decided":
-            if prefs:
+            if vals:
                 from collections import Counter
-                top = Counter(prefs).most_common(1)[0][0]
+                top = Counter(vals).most_common(1)[0][0]
                 return f"Decision reached: {top}. Thanks everyone!"
             return "Decision has been finalized. Thanks!"
 
         if state == "deciding":
-            if prefs:
+            if vals:
                 from collections import Counter
-                top = Counter(prefs).most_common(1)[0][0]
+                top = Counter(vals).most_common(1)[0][0]
                 return f"It looks like '{top}' works. Can everyone confirm?"
             return "We have enough input. Shall we finalize?"
 
@@ -181,10 +228,17 @@ def _compute_targeting(
             "targeting_reason": "missing_preference",
         }
 
-    # Priority 4: conflict participants
+    # Priority 4: conflict participants (spec v2.10.5 §28)
+    # Must target participants involved in conflicts, NOT full group
     if state == State.RESOLVING:
+        conflict_participants: set[str] = set()
+        for c in ctx.conflicts:
+            if c.get("status") == "open":
+                conflict_participants.update(c.get("participants", []))
+        # Fallback: if no conflict participants found, use responded
+        recipients = sorted(conflict_participants) if conflict_participants else list(responded)
         return {
-            "recipients": list(responded),
+            "recipients": recipients,
             "priority": "high",
             "targeting_reason": "conflict_participant",
         }
@@ -369,6 +423,7 @@ def _print_step(step: int, data: dict) -> None:
     print(f"  STEP {step}")
     print(_SEP)
     print(f"  ACTOR:              {data['actor']}")
+    print(f"  RECIPIENT(S):       {data['recipients']}")
     print(f"  MESSAGE:            {data['message']}")
     print(f"  SIGNALS:            {data['signals']}")
     print(f"  EVENT:              {data['event']}")
@@ -391,6 +446,7 @@ def _print_summary(scenario_name: str, ctx: DecisionContext, state: State,
     print(f"\n{'═' * 60}")
     print(f"  SUMMARY — {scenario_name}")
     print(f"{'═' * 60}")
+    open_conflicts = [c for c in ctx.conflicts if c.get("status") == "open"]
     print(f"  Final state:            {state.value}")
     print(f"  Final decision:         {ctx.decision or '(none)'}")
     print(f"  Participants:           {ctx.participants}")
@@ -399,6 +455,7 @@ def _print_summary(scenario_name: str, ctx: DecisionContext, state: State,
     print(f"  System events fired:    {n_system}")
     print(f"  Confirmation required:  {_confirmation_required(ctx)}")
     print(f"  Decision quality:       {_evaluate_decision_quality(ctx) or '(n/a)'}")
+    print(f"  Open conflicts:         {len(open_conflicts)}")
     print()
 
 
@@ -508,6 +565,7 @@ def _simulate_scenario(
 
         _print_step(step, {
             "actor": f"user ({participant})",
+            "recipients": targeting["recipients"],
             "message": message,
             "signals": signals,
             "event": event.value,
@@ -533,30 +591,31 @@ def _simulate_scenario(
 # ---------------------------------------------------------------------------
 
 def _run_scenario_1(llm) -> None:
-    """Fast path: quick agreement, no confirmation needed."""
+    """Hidden conflict: late hard constraint contradicts apparent consensus."""
     _simulate_scenario(
-        name="Fast Path — Quick Agreement",
+        name="Hidden Conflict",
         question="When should we meet?",
-        participants=["alice", "bob"],
-        min_participants=2,
+        participants=["alice", "bob", "carol"],
+        min_participants=3,
         messages=[
             ("alice", "Wednesday works for me"),
             ("bob", "Wednesday is fine"),
+            ("carol", "I cannot do Wednesday at all"),
         ],
         llm=llm,
     )
 
 
 def _run_scenario_2(llm) -> None:
-    """Fragile / confirmation: conflict between participants."""
+    """False consensus / fragile quality: weak preferences, no real conviction."""
     _simulate_scenario(
-        name="Fragile — Conflict / Confirmation",
+        name="False Consensus — Fragile Quality",
         question="Where should we eat?",
         participants=["alice", "bob"],
         min_participants=2,
         messages=[
-            ("alice", "I definitely want Italian"),
-            ("bob", "I'd really prefer Asian"),
+            ("alice", "I guess Italian is ok"),
+            ("bob", "Italian is fine I guess"),
         ],
         llm=llm,
     )
@@ -572,6 +631,21 @@ def _run_scenario_3(llm) -> None:
         messages=[
             ("alice", "I'm flexible"),
             ("bob", "I'm also flexible, evening is fine"),
+        ],
+        llm=llm,
+    )
+
+
+def _run_scenario_4(llm) -> None:
+    """Multi-dimensional decision gap: day vs time on separate axes."""
+    _simulate_scenario(
+        name="Multi-Dimensional Decision Gap",
+        question="When should we meet?",
+        participants=["alice", "bob"],
+        min_participants=2,
+        messages=[
+            ("alice", "Wednesday works"),
+            ("bob", "Evening is best for me"),
         ],
         llm=llm,
     )
@@ -604,6 +678,7 @@ def main() -> None:
         "1": _run_scenario_1,
         "2": _run_scenario_2,
         "3": _run_scenario_3,
+        "4": _run_scenario_4,
     }
 
     if args and args[0] in scenarios:
