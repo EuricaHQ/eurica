@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
@@ -51,16 +52,52 @@ def _confirmation_required(ctx: DecisionContext) -> bool:
 # Context helpers
 # ---------------------------------------------------------------------------
 
+def _map_conflict_signal(
+    context: DecisionContext,
+    signals: dict,
+    actor: str,
+) -> list[dict]:
+    """Spec v2.10.3 §25.7.2: signal.conflict → ctx.conflicts mapping.
+
+    Creates a structured conflict entry when signal.conflict is true.
+    Deduplication (§25.7.5): skip if an open conflict from the same
+    actor + source already exists.
+    """
+    if not signals.get("conflict"):
+        return context.conflicts
+
+    # Deduplication: same actor, same source, still open
+    for existing in context.conflicts:
+        if (
+            existing.get("source") == "llm_signal"
+            and existing.get("status") == "open"
+            and actor in existing.get("participants", [])
+        ):
+            return context.conflicts
+
+    entry = {
+        "participants": [actor],
+        "source": "llm_signal",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "open",
+    }
+    return context.conflicts + [entry]
+
+
 def _apply_actions(
     context: DecisionContext,
     actions: list[Action],
     signals: dict,
+    actor: str = "",
 ) -> DecisionContext:
     """Merge signal data into context after transition.
 
     This is the ONLY place where LLM-extracted signals update the context.
     Actions are recorded but do not alter context here — they describe
     WHAT should happen, and the LLM response layer handles the HOW.
+
+    Spec v2.10.3 §25.7: signal.conflict is materialized into ctx.conflicts
+    so that guards operate exclusively on structured context.
     """
     return replace(
         context,
@@ -72,6 +109,7 @@ def _apply_actions(
         objections=context.objections + (
             ["objection"] if signals.get("objection") else []
         ),
+        conflicts=_map_conflict_signal(context, signals, actor),
         flexibility_signals=context.flexibility_signals + (
             [signals["flexibility"]] if "flexibility" in signals else []
         ),
@@ -195,7 +233,7 @@ def post_message(req: MessageRequest):
     all_actions.extend(actions)
 
     # 6. Apply actions + merge signals into context
-    context = _apply_actions(context, actions, signals)
+    context = _apply_actions(context, actions, signals, actor=req.participant)
 
     # 7. System event loop — allow internal state progression
     for _ in range(_MAX_SYSTEM_ITERATIONS):

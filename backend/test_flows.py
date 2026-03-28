@@ -91,7 +91,12 @@ def test_uncertainty_then_confirm():
 
 def test_conflict_loop():
     """aggregating → resolving → (AGGREGATION_COMPLETED) → aggregating → deciding."""
-    ctx = replace(_base_context(), conflicts=[{"type": "preference_clash"}])
+    ctx = replace(_base_context(), conflicts=[{
+        "participants": ["alice"],
+        "source": "llm_signal",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "status": "open",
+    }])
 
     # Aggregation sees conflicts → resolving
     state, _, ctx = _step(

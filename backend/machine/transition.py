@@ -50,7 +50,8 @@ def _participation_not_satisfied(ctx: DecisionContext) -> bool:
 
 
 def _has_conflict(ctx: DecisionContext) -> bool:
-    return len(ctx.conflicts) > 0
+    """Spec v2.10.3 §25.7.7: evaluate open conflicts only."""
+    return any(c.get("status") == "open" for c in ctx.conflicts)
 
 
 def _needs_validation(ctx: DecisionContext) -> bool:
