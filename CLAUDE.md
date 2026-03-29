@@ -176,6 +176,25 @@ If Core Spec contains communication-related constraints (phrasing rules, tone, m
 - Run full test suite before completion
 - Add tests for edge cases
 
+## Implementation Notes Governance
+
+- /implementation/notes.md is the canonical place for:
+  → implementation decisions
+  → simplifications
+  → temporary deviations from spec
+- This file is:
+  → non-authoritative
+  → documentation only
+  → separate from spec
+- Claude MAY propose entries for this file
+- Claude MUST NOT:
+  - add entries autonomously
+  - modify entries without instruction
+- Updates to notes.md require explicit instruction
+- Notes MUST reflect actual implemented behavior and include rationale and future intent
+- Notes MUST NOT define system logic, override spec, or introduce new behavior
+- Entries must NOT introduce new behavior
+
 ## Current Focus
 
 - Dimension completeness (NOT yet enforced)
